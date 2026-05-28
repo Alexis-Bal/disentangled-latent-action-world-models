@@ -3,6 +3,8 @@
 <p align="center">
   <a href="https://disentangled-latent-action-world-models.github.io/"><img src="https://img.shields.io/badge/Project-Page-blue" alt="Project Page"></a>
   <a href="https://arxiv.org/abs/2605.15725"><img src="https://img.shields.io/badge/arXiv-2605.15725-b31b1b" alt="arXiv"></a>
+  <a href="https://huggingface.co/senngadaisuki/disentangled-latent-action-world-models"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Checkpoint-Hugging%20Face-yellow" alt="Hugging Face Checkpoint"></a>
+  <a href="https://huggingface.co/datasets/senngadaisuki/omni-primitive-transforms"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Dataset-Hugging%20Face-yellow" alt="Hugging Face Dataset"></a>
   <a href="#citation"><img src="https://img.shields.io/badge/BibTeX-Citation-green" alt="Citation"></a>
 </p>
 
