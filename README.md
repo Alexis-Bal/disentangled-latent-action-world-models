@@ -215,9 +215,11 @@ data/recon/
 
 ### LoopNav
 
-[LoopNav](https://arxiv.org/abs/2505.22976) is used for Minecraft navigation
-videos with discrete step-by-step controls. The loader recursively scans for
-run folders that contain `meta.json` and numbered frame images:
+[LoopNav](https://arxiv.org/abs/2505.22976) is used for Minecraft navigation videos with discrete step-by-step controls. Due to the extensive size of the original dataset, we utilize a subset for our experiments:
+* **Villages:** Out of the 6 village types (20 instances each), we only use the first 2 instances per type (`xxxx_1`, `xxxx_2`).
+* **Biomes & Locations:** From the 26 available environments (18 biomes + 8 locations), we sample 4 specific areas: forest, river, stony shore, and end city.
+
+The loader recursively scans for run folders that contain `meta.json` and numbered frame images:
 
 ```text
 data/loopnav/frames/
@@ -229,7 +231,6 @@ data/loopnav/frames/
           00000.jpg
           00001.jpg
           ...
-```
 
 To train with the full dataset mixture from the paper, enable all four datasets
 and set matching sampling ratios in
