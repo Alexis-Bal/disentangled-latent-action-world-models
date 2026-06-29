@@ -202,6 +202,59 @@ def enable_mc_dropout(model: nn.Module) -> int:
     return count
 
 
+@torch.no_grad()
+def suggest_init_from_inverse_model(
+    dila_model: nn.Module,
+    action_mlp: nn.Module,
+    s_t: torch.Tensor,
+    s_goal: torch.Tensor,
+    z_norm: Optional[float] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Warm-start ``(z, a)`` for planning toward *s_goal*.
+
+    The active-inference planner initialises the latent dynamic ``z_t`` to zeros
+    by default.  Near ``z = 0`` the (frozen) forward dynamics model is largely
+    insensitive, so the pragmatic energy ``‖s_pred − s_goal‖²`` barely moves and
+    the optimised action collapses to ~``ActionMLP(s, 0)`` (the agent does
+    nothing).  This helper fixes that by initialising ``z_t`` to the latent
+    action DiLA's *inverse model* expects to transform ``s_t`` into ``s_goal``
+    -- i.e. the latent dynamic that points at the goal -- rescaled to a typical
+    in-distribution magnitude so the FDM actually responds.  The matching
+    physical action ``a = ActionMLP(s_t, z)`` is returned as the action
+    warm-start.
+
+    This is an *initialisation* only; it does **not** add a new energy term, so
+    the single-level objective remains ``α·E_pragmatic + β·E_action``.
+
+    Parameters
+    ----------
+    dila_model : nn.Module
+        A trained :class:`Inverse_World_model` (uses ``Inverse_model``).
+    action_mlp : nn.Module
+        The trained ``(s, z) -> a`` mapping.
+    s_t, s_goal : torch.Tensor
+        Current and goal structure embeddings ``[B, *state_shape]``.
+    z_norm : float | None
+        Target L2 norm for ``z`` (e.g. the mean training latent-action norm).
+        If ``None``, ``z`` is used as-is.
+
+    Returns
+    -------
+    z : torch.Tensor  ``[B, D]``
+    a : torch.Tensor  ``[B, A]``
+    """
+    g_prev = s_t.unsqueeze(1)                       # [B, 1, *state_shape]
+    g_next = s_goal.unsqueeze(1)
+    z = dila_model.Inverse_model(g_prev, g_next)    # [B, 1, D]
+    if z.dim() > 2:
+        z = z.squeeze(1)                            # [B, D]
+    if z_norm is not None:
+        n = z.norm(dim=1, keepdim=True).clamp(min=1e-6)
+        z = z * (float(z_norm) / n)
+    a = action_mlp(s_t, z)                          # [B, A]
+    return z, a
+
+
 # ---------------------------------------------------------------------------
 # Hierarchical Active Inference planner
 # ---------------------------------------------------------------------------
