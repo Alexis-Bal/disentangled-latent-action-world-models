@@ -905,3 +905,142 @@ class HierarchicalActiveInference(nn.Module):
             action_dim=action_dim,
             **kwargs,
         )
+
+# ---------------------------------------------------------------------------
+# Action-space planner (works with a FROZEN DiLA FDM)
+# ---------------------------------------------------------------------------
+
+class ActionSpacePlanner(nn.Module):
+    """Action-space active inference planner for a frozen DiLA FDM.
+
+    The dual :class:`HierarchicalActiveInference` planner optimises ``(a, z)``
+    and decodes ``z -> a`` via an ``ActionMLP``.  That decode is the weak link
+    with a *frozen* DiLA: the latent action ``z`` is self-supervised, so
+    ``z -> a`` is ambiguous and the ``ActionMLP`` collapses to the mean action
+    (≈ 0) -- the agent does nothing.  Moreover ``E_pragmatic`` depends on ``z``
+    only, so ``a`` never receives a goal-directed gradient.
+
+    This planner fixes both issues by optimising the **physical action** ``a``
+    *directly* through a trained, state-conditioned decoder ``a2z(s, a) -> z``
+    and the frozen forward dynamics ``FDM(s, z)``.  The applied action is the
+    optimised ``a``, so the plan transfers to the environment without a
+    ``z -> a`` decode mismatch, and ``a`` gets a genuine goal-directed gradient.
+
+    Energy (single level):
+
+        G = alpha * E_pragmatic + beta * E_action
+        E_pragmatic = || s_t + FDM(s_t, a2z(s_t, a)) - s_goal ||^2
+        E_action    = || a - a_init ||^2   (smoothness; falls back to ||a||^2)
+
+    Parameters
+    ----------
+    fdm : nn.Module
+        Frozen DiLA forward dynamics ``FDM(s, z)`` (predicts delta if
+        *fdm_predicts_delta*).
+    a2z : nn.Module
+        Trained state-conditioned decoder ``a2z(s, a) -> z`` (s: ``[B, *state_shape]``,
+        a: ``[B, A]`` -> z: ``[B, D]``).
+    """
+
+    def __init__(
+        self,
+        fdm: nn.Module,
+        a2z: nn.Module,
+        state_shape: Tuple[int, ...],
+        latent_action_dim: int,
+        action_dim: int,
+        num_iterations: int = 20,
+        lr_a: float = 5e-2,
+        alpha: float = 1.0,
+        beta: float = 0.01,
+        fdm_predicts_delta: bool = True,
+        max_grad_norm: Optional[float] = None,
+        use_mc_dropout: bool = False,
+    ) -> None:
+        super().__init__()
+        self.fdm = fdm
+        self.a2z = a2z
+        for p in self.fdm.parameters():
+            p.requires_grad_(False)
+        for p in self.a2z.parameters():
+            p.requires_grad_(False)
+
+        self.state_shape = tuple(state_shape)
+        self.latent_action_dim = latent_action_dim
+        self.action_dim = action_dim
+        self.num_iterations = num_iterations
+        self.lr_a = lr_a
+        self.alpha = alpha
+        self.beta = beta
+        self.fdm_predicts_delta = fdm_predicts_delta
+        self.max_grad_norm = max_grad_norm
+        self.use_mc_dropout = use_mc_dropout
+        if not use_mc_dropout:
+            set_dropout_p(self.fdm, 0.0)
+            set_dropout_p(self.a2z, 0.0)
+
+    def plan(
+        self,
+        s_t: torch.Tensor,
+        s_goal: torch.Tensor,
+        a_init: Optional[torch.Tensor] = None,
+        return_history: bool = True,
+        verbose: bool = False,
+    ) -> Tuple[torch.Tensor, None, Dict[str, Any]]:
+        """Optimise the physical action ``a`` to drive ``s_pred`` toward ``s_goal``.
+
+        Returns ``(a_star, None, info)`` to mirror the dual planner's signature.
+        """
+        device, dtype = s_t.device, s_t.dtype
+        B = s_t.shape[0]
+        assert s_t.shape[1:] == self.state_shape, (s_t.shape, self.state_shape)
+        assert s_goal.shape[1:] == self.state_shape
+
+        if a_init is not None:
+            a_t = a_init.clone().detach().to(device=device, dtype=dtype)
+        else:
+            a_t = torch.zeros(B, self.action_dim, device=device, dtype=dtype)
+        a_t.requires_grad_(True)
+
+        if self.use_mc_dropout:
+            enable_mc_dropout(self.fdm)
+            enable_mc_dropout(self.a2z)
+
+        opt = torch.optim.Adam([a_t], lr=self.lr_a)
+        s_t_exp = s_t.unsqueeze(1)
+        sgf = s_goal.flatten(1)
+        a_ref = a_init.detach().to(device=device, dtype=dtype) if a_init is not None else None
+
+        history = {"e_pragmatic": [], "e_action": []}
+        for it in range(self.num_iterations):
+            opt.zero_grad()
+            z = self.a2z(s_t, a_t)                       # [B, D]
+            z_exp = z.unsqueeze(1)                       # [B, 1, D]
+            fdm_out = self.fdm(s_t_exp, z_exp)
+            s_pred = (s_t_exp + fdm_out) if self.fdm_predicts_delta else fdm_out
+            s_pred = s_pred.squeeze(1)                   # [B, *state_shape]
+            e_prag = ((s_pred.flatten(1) - sgf) ** 2).sum(1).mean()
+            if a_ref is not None:
+                e_act = ((a_t - a_ref) ** 2).sum(1).mean()
+            else:
+                e_act = (a_t ** 2).sum(1).mean()
+            g = self.alpha * e_prag + self.beta * e_act
+            g.backward()
+            if self.max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_([a_t], self.max_grad_norm)
+            opt.step()
+            history["e_pragmatic"].append(e_prag.item())
+            history["e_action"].append(e_act.item())
+            if verbose:
+                print(f"  it {it:3d} prag={e_prag.item():.4f} act={e_act.item():.4f} "
+                      f"|a|={a_t.detach().norm().item():.4f}")
+
+        a_star = a_t.detach().clamp(-1, 1)
+        info: Dict[str, Any] = {
+            "final_energies": {
+                "e_pragmatic": history["e_pragmatic"][-1],
+                "e_action": history["e_action"][-1],
+            },
+            "history": history,
+        }
+        return a_star, None, info
